@@ -1,8 +1,61 @@
 
-import { app, shell, BrowserWindow, ipcMain } from 'electron'
+import { app, shell, BrowserWindow, ipcMain, safeStorage } from 'electron'
 import { join } from 'path'
+import { mkdir, readFile, writeFile, unlink } from 'fs/promises'
 import { electronApp, optimizer, is } from '@electron-toolkit/utils'
 import icon from '../../resources/icon.png?asset'
+
+function getKeyFilePath(userId: string): string {
+  if (!userId || !/^[a-zA-Z0-9-]+$/.test(userId)) {
+    throw new Error('Invalid user ID')
+  }
+
+  return join(app.getPath('userData'), 'keys', `${userId}.key`)
+}
+
+ipcMain.handle('secure-storage:save', async (_, userId: string, keyMaterial: string) => {
+  if (typeof keyMaterial !== 'string' || !keyMaterial) {
+    throw new Error('Invalid key material')
+  }
+
+  if (!safeStorage.isEncryptionAvailable()) {
+    throw new Error('OS encryption is unavailable')
+  }
+
+  const filePath = getKeyFilePath(userId)
+  await mkdir(join(app.getPath('userData'), 'keys'), { recursive: true })
+
+  const encrypted = safeStorage.encryptString(keyMaterial)
+  await writeFile(filePath, encrypted, { mode: 0o600 })
+
+  return true
+})
+
+ipcMain.handle('secure-storage:load', async (_, userId: string) => {
+  if (!safeStorage.isEncryptionAvailable()) {
+    throw new Error('OS encryption is unavailable')
+  }
+
+  try {
+    const encrypted = await readFile(getKeyFilePath(userId))
+    return safeStorage.decryptString(encrypted)
+  } catch (error) {
+    const code = (error as NodeJS.ErrnoException).code
+    if (code === 'ENOENT') return null
+    throw error
+  }
+})
+
+ipcMain.handle('secure-storage:delete', async (_, userId: string) => {
+  try {
+    await unlink(getKeyFilePath(userId))
+    return true
+  } catch (error) {
+    const code = (error as NodeJS.ErrnoException).code
+    if (code === 'ENOENT') return true
+    throw error
+  }
+})
 
 function createWindow(): void {
   const mainWindow = new BrowserWindow({
