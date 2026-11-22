@@ -5,6 +5,43 @@ import { mkdir, readFile, writeFile, unlink } from 'fs/promises'
 import { electronApp, optimizer, is } from '@electron-toolkit/utils'
 import icon from '../../resources/icon.png?asset'
 
+const protocolScheme = 'cipherchat'
+let mainWindow: BrowserWindow | null = null
+const pendingAuthLinks: string[] = []
+
+function queueAuthLink(value: string): void {
+  if (!value.startsWith(`${protocolScheme}://`)) return
+
+  if (mainWindow && !mainWindow.isDestroyed() && !mainWindow.webContents.isLoading()) {
+    mainWindow.webContents.send('auth:deep-link', value)
+  } else {
+    pendingAuthLinks.push(value)
+  }
+}
+
+const initialDeepLink = process.argv.find((arg) => arg.startsWith(`${protocolScheme}://`))
+if (initialDeepLink) pendingAuthLinks.push(initialDeepLink)
+
+app.on('open-url', (event, url) => {
+  event.preventDefault()
+  queueAuthLink(url)
+})
+
+const hasSingleInstanceLock = app.requestSingleInstanceLock()
+if (!hasSingleInstanceLock) app.quit()
+else {
+  app.on('second-instance', (_event, commandLine) => {
+    const deepLink = commandLine.find((arg) => arg.startsWith(`${protocolScheme}://`))
+    if (deepLink) queueAuthLink(deepLink)
+    if (mainWindow && !mainWindow.isDestroyed()) {
+      if (mainWindow.isMinimized()) mainWindow.restore()
+      mainWindow.focus()
+    }
+  })
+}
+
+ipcMain.handle('auth:get-pending-deep-links', () => pendingAuthLinks.splice(0))
+
 function getKeyFilePath(userId: string): string {
   if (!userId || !/^[a-zA-Z0-9-]+$/.test(userId)) {
     throw new Error('Invalid user ID')
@@ -58,7 +95,7 @@ ipcMain.handle('secure-storage:delete', async (_, userId: string) => {
 })
 
 function createWindow(): void {
-  const mainWindow = new BrowserWindow({
+  const window = new BrowserWindow({
     width: 900,
     height: 670,
     show: false,
@@ -69,24 +106,31 @@ function createWindow(): void {
       sandbox: false
     }
   })
+  mainWindow = window
 
-  mainWindow.on('ready-to-show', () => {
-    mainWindow.show()
+  window.on('ready-to-show', () => {
+    window.show()
   })
 
-  mainWindow.webContents.setWindowOpenHandler((details) => {
+  window.webContents.setWindowOpenHandler((details) => {
     shell.openExternal(details.url)
     return { action: 'deny' }
   })
 
   if (is.dev && process.env['ELECTRON_RENDERER_URL']) {
-    mainWindow.loadURL(process.env['ELECTRON_RENDERER_URL'])
+    window.loadURL(process.env['ELECTRON_RENDERER_URL'])
   } else {
-    mainWindow.loadFile(join(__dirname, '../renderer/index.html'))
+    window.loadFile(join(__dirname, '../renderer/index.html'))
   }
 }
 
 app.whenReady().then(() => {
+  if (process.defaultApp && process.argv[1]) {
+    app.setAsDefaultProtocolClient(protocolScheme, process.execPath, [process.argv[1]])
+  } else {
+    app.setAsDefaultProtocolClient(protocolScheme)
+  }
+
   electronApp.setAppUserModelId('com.electron')
 
   app.on('browser-window-created', (_, window) => {

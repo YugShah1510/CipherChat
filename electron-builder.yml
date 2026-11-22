@@ -1,5 +1,9 @@
 appId: com.electron.app
-productName: cipherchat
+productName: CipherChat
+protocols:
+  - name: CipherChat Authentication
+    schemes:
+      - cipherchat
 directories:
   buildResources: build
 files:
@@ -19,6 +23,11 @@ nsis:
   uninstallDisplayName: ${productName}
   createDesktopShortcut: always
 mac:
+  icon: build/icon.icns
+  target:
+    - target: dmg
+      arch:
+        - arm64
   entitlementsInherit: build/entitlements.mac.plist
   extendInfo:
     - NSCameraUsageDescription: Application requests access to the device's camera.
@@ -28,6 +37,15 @@ mac:
   notarize: false
 dmg:
   artifactName: ${name}-${version}.${ext}
+  contents:
+    - x: 130
+      y: 220
+      type: file
+      name: CipherChat.app
+    - x: 410
+      y: 220
+      type: link
+      path: /Applications
 linux:
   target:
     - AppImage

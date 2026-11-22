@@ -74,7 +74,9 @@ function formatTime(value: string): string {
 }
 
 function App(): React.JSX.Element {
-  const [screen, setScreen] = useState<'login' | 'signup' | 'forgot' | 'dashboard'>('login')
+  const [screen, setScreen] = useState<
+    'login' | 'signup' | 'forgot' | 'reset' | 'dashboard'
+  >('login')
   const [authName, setAuthName] = useState('')
   const [authEmail, setAuthEmail] = useState('')
   const [authPassword, setAuthPassword] = useState('')
@@ -83,6 +85,8 @@ function App(): React.JSX.Element {
   const [authBusy, setAuthBusy] = useState(false)
   const [authReady, setAuthReady] = useState(false)
   const [authUserId, setAuthUserId] = useState<string | null>(null)
+  const [showPassword, setShowPassword] = useState(false)
+  const recoveryModeRef = useRef(false)
 
   const [conversations, setConversations] = useState<Conversation[]>([])
   const [selectedId, setSelectedId] = useState<string | number>('')
@@ -238,6 +242,58 @@ function App(): React.JSX.Element {
     [conversations, search]
   )
 
+  const handleAuthDeepLink = async (value: string): Promise<void> => {
+    try {
+      const callbackUrl = new URL(value)
+      const params = new URLSearchParams(callbackUrl.hash.replace(/^#/, ''))
+      callbackUrl.searchParams.forEach((item, key) => params.set(key, item))
+      const callbackError = params.get('error_description') || params.get('error')
+      if (callbackError) throw new Error(callbackError.replace(/\+/g, ' '))
+
+      setAuthBusy(true)
+      setAuthNotice('')
+      recoveryModeRef.current = true
+
+      const tokenHash = params.get('token_hash')
+      const accessToken = params.get('access_token')
+      const refreshToken = params.get('refresh_token')
+      const code = params.get('code')
+
+      if (tokenHash) {
+        const { error } = await supabase.auth.verifyOtp({
+          token_hash: tokenHash,
+          type: 'recovery'
+        })
+        if (error) throw error
+      } else if (accessToken && refreshToken) {
+        const { error } = await supabase.auth.setSession({
+          access_token: accessToken,
+          refresh_token: refreshToken
+        })
+        if (error) throw error
+      } else if (code) {
+        const { error } = await supabase.auth.exchangeCodeForSession(code)
+        if (error) throw error
+      } else {
+        throw new Error('This password reset link is incomplete or expired.')
+      }
+
+      setScreen('reset')
+      setAuthPassword('')
+      setConfirmPassword('')
+    } catch (error) {
+      recoveryModeRef.current = false
+      setScreen('login')
+      setAuthNotice(
+        error instanceof Error
+          ? `Unable to open password reset link: ${error.message}`
+          : 'Unable to open password reset link.'
+      )
+    } finally {
+      setAuthBusy(false)
+    }
+  }
+
   // Restore the Supabase session and listen for authentication changes.
   useEffect(() => {
     let active = true
@@ -254,7 +310,7 @@ function App(): React.JSX.Element {
         setAuthName(
           (data.session.user.user_metadata?.full_name as string | undefined) ?? ''
         )
-        setScreen('dashboard')
+        setScreen(recoveryModeRef.current ? 'reset' : 'dashboard')
       }
 
       setAuthReady(true)
@@ -263,7 +319,7 @@ function App(): React.JSX.Element {
     void restoreSession()
 
     const { data: authListener } = supabase.auth.onAuthStateChange(
-      (_event, session) => {
+      (event, session) => {
         if (!active) return
 
         if (session) {
@@ -272,7 +328,12 @@ function App(): React.JSX.Element {
           setAuthName(
             (session.user.user_metadata?.full_name as string | undefined) ?? ''
           )
-          setScreen('dashboard')
+          if (event === 'PASSWORD_RECOVERY') recoveryModeRef.current = true
+          setScreen(
+            event === 'PASSWORD_RECOVERY' || recoveryModeRef.current
+              ? 'reset'
+              : 'dashboard'
+          )
         } else {
           setAuthUserId(null)
           setAuthName('')
@@ -284,9 +345,17 @@ function App(): React.JSX.Element {
       }
     )
 
+    const removeDeepLinkListener = window.api.auth.onDeepLink((url) => {
+      void handleAuthDeepLink(url)
+    })
+    void window.api.auth.getPendingDeepLinks().then((urls) => {
+      if (active) urls.forEach((url) => void handleAuthDeepLink(url))
+    })
+
     return () => {
       active = false
       authListener.subscription.unsubscribe()
+      removeDeepLinkListener()
     }
   }, [])
 
@@ -731,18 +800,57 @@ function App(): React.JSX.Element {
   }
 
   const handlePasswordReset = async (): Promise<void> => {
+    const email = authEmail.trim()
+    if (!email) {
+      setAuthNotice('Enter your email address to request a reset link.')
+      return
+    }
+
     setAuthBusy(true)
     setAuthNotice('')
 
     try {
-      const { error } = await supabase.auth.resetPasswordForEmail(authEmail.trim())
+      const { error } = await supabase.auth.resetPasswordForEmail(email, {
+        redirectTo: 'cipherchat://auth/callback'
+      })
       if (error) throw error
       setAuthNotice(
-        'If an account exists for that email, a password reset link has been sent.'
+        'If an account exists for that email, a reset link has been requested. Check your inbox and spam folder.'
       )
     } catch (error) {
       setAuthNotice(
         error instanceof Error ? error.message : 'Unable to send the reset link.'
+      )
+    } finally {
+      setAuthBusy(false)
+    }
+  }
+
+  const handleUpdatePassword = async (): Promise<void> => {
+    if (authPassword.length < 8) {
+      setAuthNotice('Password must be at least 8 characters long.')
+      return
+    }
+    if (authPassword !== confirmPassword) {
+      setAuthNotice('Passwords do not match.')
+      return
+    }
+
+    setAuthBusy(true)
+    setAuthNotice('')
+    try {
+      const { error } = await supabase.auth.updateUser({ password: authPassword })
+      if (error) throw error
+      recoveryModeRef.current = false
+      setAuthPassword('')
+      setConfirmPassword('')
+      const { error: signOutError } = await supabase.auth.signOut()
+      if (signOutError) throw signOutError
+      setScreen('login')
+      setAuthNotice('Your password was updated. Sign in with your new password.')
+    } catch (error) {
+      setAuthNotice(
+        error instanceof Error ? error.message : 'Unable to update your password.'
       )
     } finally {
       setAuthBusy(false)
@@ -1520,6 +1628,62 @@ function App(): React.JSX.Element {
                   Back to login
                 </button>
               </p>
+            </>
+          )}
+
+          {screen === 'reset' && (
+            <>
+              <div className="auth-heading">
+                <h2>Choose a new password</h2>
+                <p>Enter and confirm the new password for your account.</p>
+              </div>
+
+              <form
+                onSubmit={(event) => {
+                  event.preventDefault()
+                  void handleUpdatePassword()
+                }}
+              >
+                <div className="auth-label-row">
+                  <label htmlFor="new-password">NEW PASSWORD</label>
+                  <button
+                    type="button"
+                    className="text-button"
+                    onClick={() => setShowPassword((value) => !value)}
+                    aria-pressed={showPassword}
+                  >
+                    {showPassword ? 'Hide' : 'Show'} password
+                  </button>
+                </div>
+                <input
+                  id="new-password"
+                  type={showPassword ? 'text' : 'password'}
+                  placeholder="At least 8 characters"
+                  value={authPassword}
+                  onChange={(event) => setAuthPassword(event.target.value)}
+                  minLength={8}
+                  autoComplete="new-password"
+                  required
+                />
+
+                <label htmlFor="confirm-new-password">CONFIRM PASSWORD</label>
+                <input
+                  id="confirm-new-password"
+                  type={showPassword ? 'text' : 'password'}
+                  placeholder="Enter password again"
+                  value={confirmPassword}
+                  onChange={(event) => setConfirmPassword(event.target.value)}
+                  minLength={8}
+                  autoComplete="new-password"
+                  required
+                />
+
+                {authNotice && <p className="auth-error" role="alert">{authNotice}</p>}
+
+                <button className="auth-submit" type="submit" disabled={authBusy}>
+                  {authBusy ? 'Updating...' : 'Update password'} <span>→</span>
+                </button>
+              </form>
             </>
           )}
 
