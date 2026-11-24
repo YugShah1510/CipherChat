@@ -1,0 +1,74 @@
+-- Desktop Realtime publication repair draft.
+--
+-- DRAFT ONLY: this file is deliberately suffixed `.sql.draft`. It has not been
+-- executed or applied. It repairs only the publication used by the existing
+-- Desktop postgres_changes subscriptions; it does not alter Desktop tables,
+-- policies, functions, messages, or reactions.
+--
+-- The linked project's supabase_realtime publication was reported empty and
+-- public.messages/public.message_reactions were confirmed absent. Recheck both
+-- facts immediately before applying. This draft aborts if another unexpected
+-- table has joined the publication, because changing publish flags is global.
+
+begin;
+
+do $preflight$
+begin
+  if not exists (
+    select 1
+    from pg_catalog.pg_publication
+    where pubname = 'supabase_realtime'
+  ) then
+    raise exception 'The supabase_realtime publication does not exist.';
+  end if;
+
+  if pg_catalog.to_regclass('public.messages') is null
+     or pg_catalog.to_regclass('public.message_reactions') is null then
+    raise exception 'Expected Desktop Realtime tables are missing from schema public.';
+  end if;
+
+  if exists (
+    select 1
+    from pg_catalog.pg_publication_tables
+    where pubname = 'supabase_realtime'
+      and not (
+        schemaname = 'public'
+        and tablename in ('messages', 'message_reactions', 'mobile_messages')
+      )
+  ) then
+    raise exception 'Unexpected tables are already in supabase_realtime; review publication-wide event changes first.';
+  end if;
+end;
+$preflight$;
+
+-- Desktop listens for INSERT/UPDATE/DELETE (`event: '*'`). Setting these
+-- publication flags is repeatable. The preflight above limits its impact to the
+-- audited Desktop tables and the separately drafted Mobile messages table.
+alter publication supabase_realtime
+  set (publish = 'insert, update, delete');
+
+-- ALTER PUBLICATION ADD TABLE has no IF NOT EXISTS form. Check membership first
+-- so rerunning this publication-only repair does not fail on duplicate entries.
+do $membership$
+begin
+  if not exists (
+    select 1 from pg_catalog.pg_publication_tables
+    where pubname = 'supabase_realtime'
+      and schemaname = 'public'
+      and tablename = 'messages'
+  ) then
+    execute 'alter publication supabase_realtime add table public.messages';
+  end if;
+
+  if not exists (
+    select 1 from pg_catalog.pg_publication_tables
+    where pubname = 'supabase_realtime'
+      and schemaname = 'public'
+      and tablename = 'message_reactions'
+  ) then
+    execute 'alter publication supabase_realtime add table public.message_reactions';
+  end if;
+end;
+$membership$;
+
+commit;
