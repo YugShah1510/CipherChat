@@ -28,7 +28,8 @@
           "imageWidth": 84
         }
       ],
-      "expo-secure-store"
+      "expo-secure-store",
+      "./plugins/withStandaloneDebugBundle"
     ],
     "experiments": {
       "typedRoutes": true
